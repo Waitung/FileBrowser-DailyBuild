@@ -1,0 +1,156 @@
+name: FileBrowser Daily Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号'
+        required: false
+        default:
+  schedule:
+    - cron: '0 20 * * *'
+
+jobs:
+  filebrowser-daily-build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: check manually
+      run: |
+        if [[ $GITHUB_EVENT_NAME == 'workflow_dispatch' ]]; then
+          echo "manually=true" >> $GITHUB_ENV
+        else 
+          echo "schedule=true" >> $GITHUB_ENV
+        fi
+
+    - name: check commits
+      if: env.schedule
+      run: |
+        repo="filebrowser/filebrowser"
+        commits_date=`curl -s https://api.github.com/repos/$repo/commits | grep -m 1 "date" | cut -d\" -f4`
+        yesterday=`date -d "-1 day" +"%Y-%m-%d 20:00:00"`
+        s_commits_date=`date -d "$commits_date" +%s`
+        s_yesterday=`date -d "$yesterday" +%s`
+        if [[ $s_commits_date -gt $s_yesterday ]]; then echo "new_commits=true" >> $GITHUB_ENV; fi
+
+    - name: check go version
+      if: env.manually || env.new_commits
+      run: |
+        go_version=`curl -Ls https://github.com/actions/go-versions/raw/main/versions-manifest.json | grep -m 1 "version" | cut -d\" -f4`
+        echo "go_version=$go_version" >> $GITHUB_ENV
+
+    - name: install go
+      if: env.manually || env.new_commits
+      uses: actions/setup-go@v2
+      with:
+        go-version: '${{ env.go_version }}'
+    
+    - name: download code
+      if: env.manually || env.new_commits
+      run: |
+        cd ~
+        git clone https://github.com/filebrowser/filebrowser.git
+
+    - name: build frontend 
+      if: env.manually || env.new_commits
+      run: |
+        cd ~/filebrowser/frontend
+        npm ci
+        npm run lint
+        npm run build
+
+    - name: build binary
+      if: env.manually || env.new_commits
+      run: |
+        cd ~/filebrowser/http
+        go get github.com/GeertJohan/go.rice
+        go get github.com/GeertJohan/go.rice/rice
+        export PATH=$PATH:$(go env GOPATH)/bin
+        rice embed-go
+
+    - name: check version
+      if: env.manually || env.new_commits
+      run: |
+        version=${{ github.event.inputs.version }}
+        if [[ -z $version ]]; then
+          version_1=`curl -s https://api.github.com/repos/filebrowser/filebrowser/releases/latest | grep 'tag_name' | cut -d\" -f4 | cut -dv -f2`
+          version_2=`curl -s https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest | grep 'tag_name' | cut -d\" -f4 | cut -dv -f2`
+          version_1_1=`echo "$version_1" | cut -d. -f1,2`
+          version_2_1=`echo "$version_2" | cut -d. -f1,2`
+          if [[ $version_1_1 == $version_2_1 ]]; then
+            version_2_2=`echo "$version_2" | cut -d. -f3`
+            version_e=`expr $version_2_2 + 1`
+          else
+            version_e=`echo "$version_1" | cut -d. -f3`
+          fi
+          version="${version_1_1}.${version_e}"
+        fi
+        echo "version=$version" >> $GITHUB_ENV
+        today=`date -d "8 hour" +%Y-%m-%d`
+        sed -i "s/(untracked)/${version}/g" ~/filebrowser/version/version.go
+        sed -i "s/(unknown)/${today}/g" ~/filebrowser/version/version.go
+
+    - name: build
+      if: env.manually || env.new_commits
+      run: |
+        cd ~/filebrowser
+        env CGO_ENABLED=0 GOARCH=amd64 GOOS=windows go build -a -o ~/build/windows-amd64/filebrowser.exe -ldflags "-s -w"
+        env CGO_ENABLED=0 GOARCH=amd64 GOOS=linux go build -a -o ~/build/linux-amd64/filebrowser -ldflags "-s -w"
+
+    - name: zip
+      if: env.manually || env.new_commits
+      run: |
+        zip --junk-paths ~/windows-amd64-filebrowser ~/build/windows-amd64/filebrowser.exe
+        zip --junk-paths ~/linux-amd64-filebrowser ~/build/linux-amd64/filebrowser
+
+    - name: checkout
+      if: env.manually || env.new_commits
+      uses: actions/checkout@v2
+
+    - name: push
+      if: env.manually || env.new_commits
+      run: |
+        today=`date -d "8 hour" +%Y-%m-%d`
+        sed -i "s/date:.*/date: $today/g" README.md
+        sed -i "s/version:.*/version: v${{ env.version }}/g" README.md
+        git config user.name Waitung
+        git config user.email wai.tung@foxmail.com
+        git add .
+        git commit -m "v${{ env.version }}"
+        git push
+        git tag -a "v${{ env.version }}" -m "build $today"
+        git push origin "v${{ env.version }}"
+
+    - name: Create Release
+      if: env.manually || env.new_commits
+      id : create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: v${{ env.version }}
+        release_name: v${{ env.version }}
+        draft: false
+        prerelease: false
+
+    - name: upload windows-amd64-filebrowser
+      if: env.manually || env.new_commits
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: /home/runner/windows-amd64-filebrowser.zip
+        asset_name: windows-amd64-filebrowser.zip
+        asset_content_type: application/zip
+
+    - name: upload linux-amd64-filebrowser
+      if: env.manually || env.new_commits
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: /home/runner/linux-amd64-filebrowser.zip
+        asset_name: linux-amd64-filebrowser.zip
+        asset_content_type: application/zip
