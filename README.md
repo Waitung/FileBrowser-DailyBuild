@@ -6,5 +6,5 @@ FileBrowser 每日构建
 - 构建 **linux-amd64** 和 **windows-amd64** 版本上传到 **release**
 
 Info：
-- date: 2021-05-05
-- version: v2.15.1
+- date: 2021-05-26
+- version: v2.15.2
